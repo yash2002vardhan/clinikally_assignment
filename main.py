@@ -320,15 +320,6 @@ def select_retrievers(query, faiss_store, pinecone_store):
     
     return selected_retrievers
 
-def safe_retrieval(retriever, query):
-    """Safely retrieve documents with error handling"""
-    try:
-        return retriever.invoke(query)
-    except Exception as e:
-        print(f"Error during retrieval: {e}")
-        # Return empty list on error
-        return []
-
 # Initialize memory function
 @st.cache_resource
 def get_memory():
