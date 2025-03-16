@@ -9,7 +9,7 @@ from langchain_pinecone import PineconeVectorStore
 from langchain.retrievers import EnsembleRetriever
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
-from langchain.memory import ConversationSummaryBufferMemory
+from langchain.memory import ConversationBufferMemory
 import re
 import pinecone
 from langchain_community.tools.brave_search.tool import BraveSearch
@@ -166,7 +166,7 @@ def classify_query(query):
         str: Either "product" or "general"
     """
     # Initialize the language model
-    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for classification
     classification_template = """
@@ -243,10 +243,7 @@ def select_retrievers(query, faiss_store, pinecone_store):
     
     # Extract brand filter
     # Common brands in the dataset
-    brands = [
-        "Abbott", "Melaglow", "Episoft", "Bioderma", "Neutriderm", "Follihair", 
-        "Senechio Pharma", "Glenmark", "Epique", "Blue Cap", "Acnechio", "GM"
-    ]
+    brands = ['Cadila Pharmaceuticals Limited', 'Barulab', 'IPCA', 'Verso', 'Maddox Biosciences', 'Catalysis S.L.', 'Aethicz Biolife', 'iS Clinical', 'Skinnovation Next', 'Medever Healthcare', 'Carbamide Forte', 'Cantabria Labs', 'KAINE', 'Glint Cosmetics', 'Ceuticoz', 'Wallace Pharmaceuticals', 'Torrent Pharmaceuticals', 'Dermawiz Laboratories', 'Geosmatic Cosmeceuticals & Cosmocare', 'Aveeno', 'Rexcin Pharmaceuticals', 'Aurel Derma', 'Sanosan', 'Beauty of Joseon', 'Ira Berry Creations', 'Galderma', 'Rene Furterer', 'bhave', 'MRHM Pharma', 'Linux Laboratories', 'EVE LOM', 'Curatio', 'Dermis Oracle', 'Fixderma', 'Mankind Pharma Ltd.', 'Ivatherm', 'Brillare', 'Dermaceutic', "Re'equil", 'USV Private Limited', 'Fillmed Laboratories', 'Regaliz', 'Gracederma Healthcare', 'East West Pharma', 'Neutrogena', 'Entod Pharmaceuticals', 'Dermx', 'Percos India', 'Velite India', 'HBC Dermiza Health Care', 'PHILIP B', 'RevitaLash', 'Klairs', 'Alkem Laboratories', 'Ajanta Pharma', 'O3+', 'Canixa Life Sciences', 'Epique', 'Abbott', 'Multiple Brands', 'Sol Derma Pharma', 'Fluence Pharma', 'La Pristine', 'Yuderma', 'Intas Pharmaceuticals', 'OZiva', "Burt's Bees", 'KAHI', 'Dermatica', 'Ora Pharmaceuticals', 'Swisse', 'Mustela', 'LISEN', 'The FormulaRx', 'WishNew Wellness', 'Talent India', 'Eterno Distributors', 'Alembic', 'Mohrish Pharmaceuticals', 'Meconus Healthcare', 'Akumentis Healthcare Ltd.', 'Aclaris Therapeutics', 'Some By Mi', 'Zydus Healthcare', 'Adonis Phytoceuticals', 'Aveil', 'Tricept Life Sciences', 'Trilogy', 'Craza Lifescience', 'Sun Pharma', 'Apex Laboratories', 'Mylan Pharmaceuticals', 'Genosys', 'Cellula', 'Dermajoint India', 'Uriage', 'Kshipra Health Solutions', 'Gufic Biosciences Limited', 'Skinska Pharmaceutica', 'GlaxoSmithKline Pharmaceuticals Ltd', 'Swiss Perfection', 'Azelia Healthcare', 'Sedge Bioceuticals', 'Ethiall Remedies', 'Cipla', 'KLM Laboratories', 'Wellbeing Nutrition', 'Biocon Biologics', "Dr. Reddy's Laboratories", 'Sesderma', 'Ethicare Remedies', 'Embryolisse', 'Cosmogen India', 'Skinmedis', 'AMA Herbal Laboratories', 'Syscutis Healthcare', 'ISDIN', 'Glenmark Pharmaceuticals', 'Adroit Biomed Ltd', 'COSRX', 'Belif', 'Encore Healthcare', 'Ultra V', 'Regium Pharmaceuticals', 'Dabur India', 'Glo Blanc', 'Elder Pharma', 'Bellacos Healthcare', 'Apple Therapeutics', 'Eris Oaknet', 'Velsorg Healthcare', 'Ralycos LLC', 'P & J Labs', 'Crystal Tomato', 'Elcon Drugs & Formulations', 'Leafon Enterprises', 'Beta Drugs Ltd.', 'Lupin Limited', 'Nourrir Pharma', 'Universal Nutriscience', 'Leeford Healthcare', 'CeraVe', 'IUNIK', 'Meghmani Lifesciences', 'Clinikally', 'Der-Joint Healthcare', 'Biopharmacieaa', 'Rockmed Pharma', 'Gunam', 'Kativa', 'Blistex', 'Aauris Healthcare', 'Cosderma Cosmoceuticals', 'ZO Skin Health', 'Palsons Derma', 'Tricos Dermatologics', 'Bioderma', 'Meyer Organics', 'Salve Pharmaceuticals', "D'Vacos Cosmetics & Neutraceuticals", 'INJA Wellness', 'Brinton Pharmaceuticals', 'Unimarck Pharma', 'Coola LLC', 'Leo Pharma', 'Ethinext Pharma', 'Nutracos Lifesciences', 'Noreva Laboratories', 'Saion International', 'One Thing', 'Quintessence Skin Science', 'Soteri Skin', 'Glowderma', 'Zofra Pharmaceuticals', 'Strenuous Healthcare', 'Nimvas Pharmaceuticals', 'General Medicine Therapeutics', 'La Med India', 'UAS Pharmaceuticals', 'Capeli', 'Biokent Healthcare', 'Iceberg Healthcare', 'Novology', 'WishCare', 'Emcure Pharmaceuticals', 'HK Vitals', 'Cosmofix Technovation', 'Wockhardt', 'Janssen', 'Senechio Pharma', 'Indiabulls Pharmaceuticals', 'Micro Labs', 'A-Derma', 'Mediste Pharmaceuticals', 'Trikona Pharmaceuticals', 'Awear Beauty', 'BABE Laboratorios', 'Indolands Pharma', 'La Roche-Posay', 'Protein Kera', 'Dermalogica', 'Sebamed', 'Skyntox', 'Hegde & Hegde Pharmaceutical LLP', 'Oaknet Healthcare', 'Torque Pharmaceuticals', 'Renewcell Cosmedica', 'Bayer Pharmaceuticals', 'Ultrasun', 'ISIS Pharma', 'Win-Medicare Pvt Ltd', 'Kemiq Lifesciences', 'The Face Shop','Kerastem', 'Beautywise', 'Justhuman', 'A. Menarini India', 'Nutrova', 'Iberia Skinbrands', 'Haruharu']
     
     # Check for brand mentions - using $eq instead of $contains for Pinecone compatibility
     for brand in brands:
@@ -321,19 +318,23 @@ def select_retrievers(query, faiss_store, pinecone_store):
     return selected_retrievers
 
 # Initialize memory function
-@st.cache_resource
 def get_memory():
     """
-    Initialize and return a ConversationSummaryBufferMemory instance.
+    Initialize and return a ConversationBufferMemory instance.
     
     Returns:
-        ConversationSummaryBufferMemory: The initialized memory
+        ConversationBufferMemory: The initialized memory
     """
-    return ConversationSummaryBufferMemory(
-        llm=ChatOpenAI(model=llm_model, temperature=0, api_key=openai_api_key), #type: ignore
-        max_token_limit=500,
+    return ConversationBufferMemory(
+        llm=ChatOpenAI(model=llm_model, api_key=openai_api_key),  # type: ignore
         return_messages=True
     )
+
+
+# Initialize memory in session state
+if "memory" not in st.session_state:
+    st.session_state.memory = get_memory() #or generic
+memory = st.session_state.memory
 
 def process_query(query, faiss_store, pinecone_store):
     """
@@ -349,8 +350,8 @@ def process_query(query, faiss_store, pinecone_store):
     Returns:
         str: The response to the query
     """
-    # Get memory
-    memory = get_memory()
+    # Use the existing memory from session state instead of creating a new one
+    memory = st.session_state.memory
     
     # Classify the query
     query_type = classify_query(query)
@@ -429,13 +430,16 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
         formatted_docs += f"- Description: {doc.page_content[:200]}...\n\n"
     
     # Initialize the language model
-    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for product information
     template = """
     You are a helpful shopping assistant for health and beauty products.
     Use the following pieces of retrieved context to answer the question.
     If you don't know the answer, just say that you don't know, don't try to make up an answer.
+    
+    CONVERSATION HISTORY:
+    {conversation_history}
     
     PRODUCT INFORMATION:
     {formatted_docs}
@@ -445,6 +449,7 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
     2. Format your response as a numbered list with product name, price, and brief description
     3. Include the exact price for each product as shown in the PRODUCT INFORMATION section
     4. Focus on providing accurate information from the context provided
+    5. Consider the conversation history for context, but prioritize the current query
     
     Question: {question}
     
@@ -453,14 +458,18 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
     # Create a prompt template with the formatted documents
     PRODUCT_PROMPT = PromptTemplate(
         template=template,
-        input_variables=["formatted_docs", "question"]
+        input_variables=["formatted_docs", "question", "conversation_history"]
     )
     
     # Create a chain for product information
     product_chain = PRODUCT_PROMPT | llm
     
     # Run the query with the formatted documents
-    result = product_chain.invoke({"formatted_docs": formatted_docs, "question": query}).content
+    result = product_chain.invoke({
+        "formatted_docs": formatted_docs, 
+        "question": query,
+        "conversation_history": conversation_history
+    }).content
     
     return result
 
@@ -483,29 +492,36 @@ def handle_general_query(query, memory):
     if not brave_api_key:
         print("Warning: BRAVE_API_KEY not found in environment variables. Using LLM's knowledge instead.")
         # Initialize the language model
-        llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
+        llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
         
         # Create a prompt template for general information without search results
         template = """
         You are a helpful health and beauty advisor.
         The user is asking for general information rather than specific product recommendations.
         
+        CONVERSATION HISTORY:
+        {conversation_history}
+        
         Question: {question}
         
         Answer the question in a helpful, informative way. If providing health advice, remind the user to consult with healthcare professionals for personalized recommendations.
+        Consider the conversation history for context, but prioritize the current query.
         """
         
         # Create a prompt template
         GENERAL_PROMPT = PromptTemplate(
             template=template,
-            input_variables=["question"]
+            input_variables=["question", "conversation_history"]
         )
         
         # Create a chain for general information
         general_chain = GENERAL_PROMPT | llm
         
         # Run the query without search results
-        result = general_chain.invoke({"question": query}).content
+        result = general_chain.invoke({
+            "question": query,
+            "conversation_history": conversation_history
+        }).content
         
         return result
     
@@ -519,7 +535,7 @@ def handle_general_query(query, memory):
     search_results = brave_search.run(query)
     
     # Initialize the language model
-    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for general information
     template = """
@@ -527,25 +543,33 @@ def handle_general_query(query, memory):
     Use the following search results to answer the user's question.
     If the search results don't contain relevant information, acknowledge that and provide general advice based on your knowledge.
     
+    CONVERSATION HISTORY:
+    {conversation_history}
+    
     SEARCH RESULTS:
     {search_results}
     
     Question: {question}
     
     Answer the question in a helpful, informative way. If providing health advice, remind the user to consult with healthcare professionals for personalized recommendations.
+    Consider the conversation history for context, but prioritize the current query.
     """
     
     # Create a prompt template
     GENERAL_PROMPT = PromptTemplate(
         template=template,
-        input_variables=["search_results", "question"]
+        input_variables=["search_results", "question", "conversation_history"]
     )
     
     # Create a chain for general information
     general_chain = GENERAL_PROMPT | llm
     
     # Run the query with the search results
-    result = general_chain.invoke({"search_results": search_results, "question": query}).content
+    result = general_chain.invoke({
+        "search_results": search_results, 
+        "question": query,
+        "conversation_history": conversation_history
+    }).content
     
     return result
 
@@ -576,10 +600,10 @@ def create_streamlit_interface():
     
     # Initialize vector stores - this will only run once due to @st.cache_resource
     with st.spinner("Loading knowledge base..."):
-        faiss_store, pinecone_store = initialize_vector_stores("generic", "faiss_index_generic")
+        faiss_store, pinecone_store = initialize_vector_stores("openai", "faiss_index")
     
-    # Initialize memory - this will only run once due to @st.cache_resource
-    memory = get_memory()
+    # Use the existing memory from session state instead of creating a new one
+    memory = st.session_state.memory
     
     # Initialize chat history in session state if it doesn't exist
     if "messages" not in st.session_state:
