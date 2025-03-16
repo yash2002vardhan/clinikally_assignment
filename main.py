@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -20,6 +20,7 @@ load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 brave_api_key = os.getenv("BRAVE_API_KEY")
+llm_model = "gpt-4o"
 
 # Initialize embeddings outside of functions to avoid PyTorch conflicts
 @st.cache_resource
@@ -31,7 +32,7 @@ def get_embeddings(model: str):
 
 # Use st.cache_resource to ensure this function runs only once
 @st.cache_resource
-def initialize_vector_stores(model:str):
+def initialize_vector_stores(model:str, faiss_docs_dir:str):
     """
     Initialize and return vector stores (FAISS and Pinecone).
     If Pinecone index already exists, skip document ingestion.
@@ -41,6 +42,7 @@ def initialize_vector_stores(model:str):
     """
     # Get embeddings
     embeddings = get_embeddings(model)
+    print("this is the embeddings", embeddings)
     if model == "openai":
         embedding_size = 1536
     else:
@@ -122,7 +124,16 @@ def initialize_vector_stores(model:str):
         print(f"Number of documents in Faiss: {len(faiss_docs)}")
 
     # Create FAISS store
-    faiss_store = FAISS.from_documents(faiss_docs, embeddings)
+    if os.path.exists(faiss_docs_dir) and faiss_docs_dir == "faiss_index":
+        print(f"Loading OpenAI FAISS store from {faiss_docs_dir}")
+        faiss_store = FAISS.load_local(faiss_docs_dir, embeddings, allow_dangerous_deserialization=True)   
+    elif os.path.exists(faiss_docs_dir) and faiss_docs_dir == "faiss_index_generic":
+        print(f"Loading Generic FAISS store from {faiss_docs_dir}")
+        faiss_store = FAISS.load_local(faiss_docs_dir, embeddings, allow_dangerous_deserialization=True)
+    else:
+        print(f"Creating new FAISS store in {faiss_docs_dir}")
+        faiss_store = FAISS.from_documents(faiss_docs, embeddings)
+        faiss_store.save_local(faiss_docs_dir)
 
     # Create Pinecone vector stores
     pinecone_store = {}
@@ -155,7 +166,7 @@ def classify_query(query):
         str: Either "product" or "general"
     """
     # Initialize the language model
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for classification
     classification_template = """
@@ -175,11 +186,10 @@ def classify_query(query):
     )
     
     # Create a chain for classification
-    from langchain.chains import LLMChain
-    classification_chain = LLMChain(llm=llm, prompt=classification_prompt)
+    classification_chain = classification_prompt | llm
     
     # Run the classification
-    result = classification_chain.run(query).strip().lower()
+    result = classification_chain.invoke({"query": query}).content.strip().lower() #type: ignore
     
     # Ensure we get a valid result
     if result not in ["product", "general"]:
@@ -329,8 +339,8 @@ def get_memory():
         ConversationSummaryBufferMemory: The initialized memory
     """
     return ConversationSummaryBufferMemory(
-        llm=ChatOpenAI(model="gpt-4o", temperature=0, api_key=openai_api_key), #type: ignore
-        max_token_limit=250,
+        llm=ChatOpenAI(model=llm_model, temperature=0, api_key=openai_api_key), #type: ignore
+        max_token_limit=500,
         return_messages=True
     )
 
@@ -361,7 +371,7 @@ def process_query(query, faiss_store, pinecone_store):
         result = handle_general_query(query, memory)
     
     # Save the conversation to memory
-    memory.save_context({"input": query}, {"output": result})
+    memory.save_context({"input": query}, {"output": result}) #type: ignore
     
     return result
 
@@ -428,7 +438,7 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
         formatted_docs += f"- Description: {doc.page_content[:200]}...\n\n"
     
     # Initialize the language model
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for product information
     template = """
@@ -456,11 +466,10 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
     )
     
     # Create a chain for product information
-    from langchain.chains import LLMChain
-    product_chain = LLMChain(llm=llm, prompt=PRODUCT_PROMPT)
+    product_chain = PRODUCT_PROMPT | llm
     
     # Run the query with the formatted documents
-    result = product_chain.run(formatted_docs=formatted_docs, question=query)
+    result = product_chain.invoke({"formatted_docs": formatted_docs, "question": query}).content
     
     return result
 
@@ -483,7 +492,7 @@ def handle_general_query(query, memory):
     if not brave_api_key:
         print("Warning: BRAVE_API_KEY not found in environment variables. Using LLM's knowledge instead.")
         # Initialize the language model
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=openai_api_key) #type: ignore
+        llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
         
         # Create a prompt template for general information without search results
         template = """
@@ -502,11 +511,10 @@ def handle_general_query(query, memory):
         )
         
         # Create a chain for general information
-        from langchain.chains import LLMChain
-        general_chain = LLMChain(llm=llm, prompt=GENERAL_PROMPT)
+        general_chain = GENERAL_PROMPT | llm
         
         # Run the query without search results
-        result = general_chain.run(question=query)
+        result = general_chain.invoke({"question": query}).content
         
         return result
     
@@ -520,7 +528,7 @@ def handle_general_query(query, memory):
     search_results = brave_search.run(query)
     
     # Initialize the language model
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=openai_api_key) #type: ignore
+    llm = ChatOpenAI(model=llm_model, temperature=0.2, api_key=openai_api_key) #type: ignore
     
     # Create a prompt template for general information
     template = """
@@ -543,11 +551,10 @@ def handle_general_query(query, memory):
     )
     
     # Create a chain for general information
-    from langchain.chains import LLMChain
-    general_chain = LLMChain(llm=llm, prompt=GENERAL_PROMPT)
+    general_chain = GENERAL_PROMPT | llm
     
     # Run the query with the search results
-    result = general_chain.run(search_results=search_results, question=query)
+    result = general_chain.invoke({"search_results": search_results, "question": query}).content
     
     return result
 
@@ -569,16 +576,16 @@ def create_streamlit_interface():
     I can recommend products or provide information based on your needs.
     """)
     
-    # Add model selection dropdown
-    model = st.selectbox(
-        "Choose the model",
-        ["openai", "generic"],
-        help="Select which model to use for embeddings and retrieval"
-    )
+    # # Add model selection dropdown
+    # model = st.selectbox(
+    #     "Choose the model",
+    #     ["openai", "generic"],
+    #     help="Select which model to use for embeddings and retrieval"
+    # )
     
     # Initialize vector stores - this will only run once due to @st.cache_resource
     with st.spinner("Loading knowledge base..."):
-        faiss_store, pinecone_store = initialize_vector_stores(model)
+        faiss_store, pinecone_store = initialize_vector_stores("generic", "faiss_index_generic")
     
     # Initialize memory - this will only run once due to @st.cache_resource
     memory = get_memory()
