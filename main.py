@@ -1,70 +1,83 @@
-import os
-import pandas as pd
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import CSVLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_pinecone import PineconeVectorStore
-from langchain.retrievers import EnsembleRetriever
-from dotenv import load_dotenv
-from langchain.prompts import PromptTemplate
-from langchain.memory import ConversationBufferMemory
-import re
-import pinecone
-from langchain_community.tools.brave_search.tool import BraveSearch
-import streamlit as st
+# Import necessary libraries
+import os  # For environment variables and file operations
+import pandas as pd  # For data manipulation
+from langchain_huggingface import HuggingFaceEmbeddings  # For text embeddings using HuggingFace models
+from langchain_community.vectorstores import FAISS  # For vector storage and similarity search
+from langchain_community.document_loaders import CSVLoader  # For loading CSV files
+from langchain.text_splitter import RecursiveCharacterTextSplitter  # For splitting text into chunks
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings  # For OpenAI's language models and embeddings
+from langchain_pinecone import PineconeVectorStore  # For Pinecone vector database
+from langchain.retrievers import EnsembleRetriever  # For combining multiple retrievers
+from dotenv import load_dotenv  # For loading environment variables
+from langchain.prompts import PromptTemplate  # For creating prompt templates
+from langchain.memory import ConversationBufferMemory  # For maintaining conversation history
+import re  # For regular expressions
+import pinecone  # For Pinecone vector database operations
+from langchain_community.tools.brave_search.tool import BraveSearch  # For web search functionality
+import streamlit as st  # For creating web interface
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
-pinecone_api_key = os.getenv("PINECONE_API_KEY")
-brave_api_key = os.getenv("BRAVE_API_KEY")
-llm_model = "gpt-4o"
+openai_api_key = os.getenv("OPENAI_API_KEY")  # Get OpenAI API key
+pinecone_api_key = os.getenv("PINECONE_API_KEY")  # Get Pinecone API key
+brave_api_key = os.getenv("BRAVE_API_KEY")  # Get Brave Search API key
+llm_model = "gpt-4o"  # Specify the language model to use
 
-# Initialize embeddings outside of functions to avoid PyTorch conflicts
+# Initialize embeddings with caching to avoid PyTorch conflicts
 @st.cache_resource
 def get_embeddings(model: str):
+    """
+    Get text embeddings based on specified model
+    Args:
+        model (str): Either 'openai' or 'generic' for HuggingFace
+    Returns:
+        Embeddings object for the specified model
+    """
     if model == "openai":
         return OpenAIEmbeddings(model = "text-embedding-3-small", api_key = "") #type: ignore
     else:
         return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Use st.cache_resource to ensure this function runs only once
+# Cache vector store initialization to run only once
 @st.cache_resource
 def initialize_vector_stores(model:str, faiss_docs_dir:str):
     """
     Initialize and return vector stores (FAISS and Pinecone).
     If Pinecone index already exists, skip document ingestion.
     
+    Args:
+        model (str): Embedding model to use ('openai' or 'generic')
+        faiss_docs_dir (str): Directory for FAISS index storage
+        
     Returns:
         tuple: (faiss_store, pinecone_store) - The initialized vector stores
     """
-    # Get embeddings
+    # Get embeddings based on model choice
     embeddings = get_embeddings(model)
     print("this is the embeddings", embeddings)
     if model == "openai":
-        embedding_size = 1536
+        embedding_size = 1536  # OpenAI embedding dimension
     else:
-        embedding_size = 384
+        embedding_size = 384  # HuggingFace embedding dimension
     
+    # Define data sources and categories
     file_paths = ["df_skin.csv", "df_hair.csv", "df_vits_supp.csv"]
     namespaces = {"df_skin.csv": "skin", "df_hair.csv": "hair", "df_vits_supp.csv": "vitamins_supplements"}
     faiss_docs = []
     pinecone_docs = {"skin": [], "hair": [], "vitamins_supplements": []}
 
-    # Initialize Pinecone with the updated API
+    # Initialize Pinecone client
     pc = pinecone.Pinecone(api_key=pinecone_api_key)
 
-    # Check if index exists
+    # Set index name based on model
     if model == "openai":
         index_name = "clinikally-rag-2"
     else:
         index_name = "clinikally-rag"
     index_exists = False
 
+    # Check if Pinecone index exists
     try:
-        # List all indexes and check if our index exists
         indexes = pc.list_indexes()
         index_exists = any(index.name == index_name for index in indexes)
         
@@ -77,19 +90,19 @@ def initialize_vector_stores(model:str, faiss_docs_dir:str):
         print(f"Error checking Pinecone index: {e}")
         print("Will proceed with document processing for FAISS.")
 
-    # Process documents for FAISS regardless of Pinecone status
+    # Process documents for vector stores
     for file in file_paths:
-        # Load the CSV file
+        # Load CSV data
         loader = CSVLoader(file_path=file)
         documents = loader.load()
         
-        # Process documents to extract title and price before splitting
+        # Extract metadata from documents
         for doc in documents:
-            # Extract title and price from the content
             content_lines = doc.page_content.split('\n')
             title = ""
             price = ""
             
+            # Parse document content for metadata
             for line in content_lines:
                 if line.startswith("Title:"):
                     title = line.replace("Title:", "").strip()
@@ -102,28 +115,28 @@ def initialize_vector_stores(model:str, faiss_docs_dir:str):
                 elif line.startswith("Metafield: my_fields.brand_name [single_line_text_field]: "):
                     brand = line.replace("Metafield: my_fields.brand_name [single_line_text_field]: ", "").strip()
             
-            # Add these to metadata
+            # Add metadata to document
             doc.metadata["Title"] = title
             doc.metadata["Price"] = price
             doc.metadata["Brand"] = brand
 
+        # Split documents into chunks for better processing
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         split_docs = text_splitter.split_documents(documents)
         namespace = namespaces[file]
         
+        # Add category metadata and prepare documents for stores
         for doc in split_docs:
             doc.metadata["Category"] = namespace
-            # Title and Price are already in metadata from the parent document
             faiss_docs.append(doc)
             
-            # Only add to pinecone_docs if we need to ingest
             if not index_exists:
                 pinecone_docs[namespace].append(doc)
         
         print(f"Number of documents in {namespace}: {len(split_docs)}")
         print(f"Number of documents in Faiss: {len(faiss_docs)}")
 
-    # Create FAISS store
+    # Initialize FAISS store
     if os.path.exists(faiss_docs_dir) and faiss_docs_dir == "faiss_index":
         print(f"Loading OpenAI FAISS store from {faiss_docs_dir}")
         faiss_store = FAISS.load_local(faiss_docs_dir, embeddings, allow_dangerous_deserialization=True)   
@@ -135,10 +148,9 @@ def initialize_vector_stores(model:str, faiss_docs_dir:str):
         faiss_store = FAISS.from_documents(faiss_docs, embeddings)
         faiss_store.save_local(faiss_docs_dir)
 
-    # Create Pinecone vector stores
+    # Initialize Pinecone stores for each category
     pinecone_store = {}
     for namespace in namespaces.values():
-        # Connect to existing vector store without adding documents
         vector_store = PineconeVectorStore(
             index_name=index_name, 
             embedding=embeddings, 
@@ -146,7 +158,7 @@ def initialize_vector_stores(model:str, faiss_docs_dir:str):
             namespace=namespace
         )
         
-        # Only add documents if the index didn't exist before
+        # Add documents if index is new
         if not index_exists and namespace in pinecone_docs and pinecone_docs[namespace]:
             print(f"Ingesting documents to Pinecone namespace: {namespace}")
             vector_store.add_documents(pinecone_docs[namespace])
@@ -158,6 +170,7 @@ def initialize_vector_stores(model:str, faiss_docs_dir:str):
 def classify_query(query):
     """
     Classifies a query as either product-based or general information.
+    Uses LLM for classification with fallback to keyword-based heuristics.
     
     Args:
         query (str): The user's query
@@ -165,10 +178,10 @@ def classify_query(query):
     Returns:
         str: Either "product" or "general"
     """
-    # Initialize the language model
+    # Initialize language model
     llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
-    # Create a prompt template for classification
+    # Create classification prompt template
     classification_template = """
     Determine if the following query is asking about specific products to purchase or if it's asking for general information/advice.
     
@@ -185,15 +198,12 @@ def classify_query(query):
         input_variables=["query"]
     )
     
-    # Create a chain for classification
+    # Create and run classification chain
     classification_chain = classification_prompt | llm
-    
-    # Run the classification
     result = classification_chain.invoke({"query": query}).content.strip().lower() #type: ignore
     
-    # Ensure we get a valid result
+    # Fallback to keyword-based classification if LLM fails
     if result not in ["product", "general"]:
-        # If the model didn't follow instructions, use heuristics as fallback
         product_keywords = ["product", "buy", "purchase", "recommend", "price", "cost", "rupees", "rs", "₹", "brand", "where to get", "suggest", "suggestions"]
         general_keywords = ["how to", "why", "what causes", "explain", "treatment", "remedy", "cure", "prevent", "tips", "advice"]
         
@@ -206,14 +216,25 @@ def classify_query(query):
     return result
 
 def select_retrievers(query, faiss_store, pinecone_store):
+    """
+    Selects appropriate retrievers based on query content and filters.
+    Handles price, brand, and rating filters.
+    
+    Args:
+        query (str): User query
+        faiss_store: FAISS vector store
+        pinecone_store: Pinecone vector store
+        
+    Returns:
+        list: List of selected retrievers
+    """
     selected_retrievers = []
     query_lower = query.lower()
     
     # Initialize filter dictionary
     filter_dict = {}
     
-    # Extract price filter from query if present
-    # Check for "under X rupees" pattern
+    # Extract price filters using regex
     under_match = re.search(r'under\s+(\d+(?:\.\d+)?)\s+(?:rs\.?|rupees?)', query_lower)
     if under_match:
         try:
@@ -222,7 +243,6 @@ def select_retrievers(query, faiss_store, pinecone_store):
         except ValueError:
             pass
     
-    # Check for "less than X rupees" pattern
     less_than_match = re.search(r'less\s+than\s+(\d+(?:\.\d+)?)\s+(?:rs\.?|rupees?)', query_lower)
     if less_than_match and "Price" not in filter_dict:
         try:
@@ -231,7 +251,6 @@ def select_retrievers(query, faiss_store, pinecone_store):
         except ValueError:
             pass
     
-    # Check for "between X and Y rupees" pattern
     between_match = re.search(r'between\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)\s+(?:rs\.?|rupees?)', query_lower)
     if between_match:
         try:
@@ -241,18 +260,16 @@ def select_retrievers(query, faiss_store, pinecone_store):
         except ValueError:
             pass
     
-    # Extract brand filter
-    # Common brands in the dataset
+    # List of available brands
     brands = ['Cadila Pharmaceuticals Limited', 'Barulab', 'IPCA', 'Verso', 'Maddox Biosciences', 'Catalysis S.L.', 'Aethicz Biolife', 'iS Clinical', 'Skinnovation Next', 'Medever Healthcare', 'Carbamide Forte', 'Cantabria Labs', 'KAINE', 'Glint Cosmetics', 'Ceuticoz', 'Wallace Pharmaceuticals', 'Torrent Pharmaceuticals', 'Dermawiz Laboratories', 'Geosmatic Cosmeceuticals & Cosmocare', 'Aveeno', 'Rexcin Pharmaceuticals', 'Aurel Derma', 'Sanosan', 'Beauty of Joseon', 'Ira Berry Creations', 'Galderma', 'Rene Furterer', 'bhave', 'MRHM Pharma', 'Linux Laboratories', 'EVE LOM', 'Curatio', 'Dermis Oracle', 'Fixderma', 'Mankind Pharma Ltd.', 'Ivatherm', 'Brillare', 'Dermaceutic', "Re'equil", 'USV Private Limited', 'Fillmed Laboratories', 'Regaliz', 'Gracederma Healthcare', 'East West Pharma', 'Neutrogena', 'Entod Pharmaceuticals', 'Dermx', 'Percos India', 'Velite India', 'HBC Dermiza Health Care', 'PHILIP B', 'RevitaLash', 'Klairs', 'Alkem Laboratories', 'Ajanta Pharma', 'O3+', 'Canixa Life Sciences', 'Epique', 'Abbott', 'Multiple Brands', 'Sol Derma Pharma', 'Fluence Pharma', 'La Pristine', 'Yuderma', 'Intas Pharmaceuticals', 'OZiva', "Burt's Bees", 'KAHI', 'Dermatica', 'Ora Pharmaceuticals', 'Swisse', 'Mustela', 'LISEN', 'The FormulaRx', 'WishNew Wellness', 'Talent India', 'Eterno Distributors', 'Alembic', 'Mohrish Pharmaceuticals', 'Meconus Healthcare', 'Akumentis Healthcare Ltd.', 'Aclaris Therapeutics', 'Some By Mi', 'Zydus Healthcare', 'Adonis Phytoceuticals', 'Aveil', 'Tricept Life Sciences', 'Trilogy', 'Craza Lifescience', 'Sun Pharma', 'Apex Laboratories', 'Mylan Pharmaceuticals', 'Genosys', 'Cellula', 'Dermajoint India', 'Uriage', 'Kshipra Health Solutions', 'Gufic Biosciences Limited', 'Skinska Pharmaceutica', 'GlaxoSmithKline Pharmaceuticals Ltd', 'Swiss Perfection', 'Azelia Healthcare', 'Sedge Bioceuticals', 'Ethiall Remedies', 'Cipla', 'KLM Laboratories', 'Wellbeing Nutrition', 'Biocon Biologics', "Dr. Reddy's Laboratories", 'Sesderma', 'Ethicare Remedies', 'Embryolisse', 'Cosmogen India', 'Skinmedis', 'AMA Herbal Laboratories', 'Syscutis Healthcare', 'ISDIN', 'Glenmark Pharmaceuticals', 'Adroit Biomed Ltd', 'COSRX', 'Belif', 'Encore Healthcare', 'Ultra V', 'Regium Pharmaceuticals', 'Dabur India', 'Glo Blanc', 'Elder Pharma', 'Bellacos Healthcare', 'Apple Therapeutics', 'Eris Oaknet', 'Velsorg Healthcare', 'Ralycos LLC', 'P & J Labs', 'Crystal Tomato', 'Elcon Drugs & Formulations', 'Leafon Enterprises', 'Beta Drugs Ltd.', 'Lupin Limited', 'Nourrir Pharma', 'Universal Nutriscience', 'Leeford Healthcare', 'CeraVe', 'IUNIK', 'Meghmani Lifesciences', 'Clinikally', 'Der-Joint Healthcare', 'Biopharmacieaa', 'Rockmed Pharma', 'Gunam', 'Kativa', 'Blistex', 'Aauris Healthcare', 'Cosderma Cosmoceuticals', 'ZO Skin Health', 'Palsons Derma', 'Tricos Dermatologics', 'Bioderma', 'Meyer Organics', 'Salve Pharmaceuticals', "D'Vacos Cosmetics & Neutraceuticals", 'INJA Wellness', 'Brinton Pharmaceuticals', 'Unimarck Pharma', 'Coola LLC', 'Leo Pharma', 'Ethinext Pharma', 'Nutracos Lifesciences', 'Noreva Laboratories', 'Saion International', 'One Thing', 'Quintessence Skin Science', 'Soteri Skin', 'Glowderma', 'Zofra Pharmaceuticals', 'Strenuous Healthcare', 'Nimvas Pharmaceuticals', 'General Medicine Therapeutics', 'La Med India', 'UAS Pharmaceuticals', 'Capeli', 'Biokent Healthcare', 'Iceberg Healthcare', 'Novology', 'WishCare', 'Emcure Pharmaceuticals', 'HK Vitals', 'Cosmofix Technovation', 'Wockhardt', 'Janssen', 'Senechio Pharma', 'Indiabulls Pharmaceuticals', 'Micro Labs', 'A-Derma', 'Mediste Pharmaceuticals', 'Trikona Pharmaceuticals', 'Awear Beauty', 'BABE Laboratorios', 'Indolands Pharma', 'La Roche-Posay', 'Protein Kera', 'Dermalogica', 'Sebamed', 'Skyntox', 'Hegde & Hegde Pharmaceutical LLP', 'Oaknet Healthcare', 'Torque Pharmaceuticals', 'Renewcell Cosmedica', 'Bayer Pharmaceuticals', 'Ultrasun', 'ISIS Pharma', 'Win-Medicare Pvt Ltd', 'Kemiq Lifesciences', 'The Face Shop','Kerastem', 'Beautywise', 'Justhuman', 'A. Menarini India', 'Nutrova', 'Iberia Skinbrands', 'Haruharu']
     
-    # Check for brand mentions - using $eq instead of $contains for Pinecone compatibility
+    # Check for brand mentions in query
     for brand in brands:
         if brand.lower() in query_lower:
             filter_dict["Brand"] = {"$eq": brand}
             break
     
-    # Extract rating filter
-    # Check for "rating above X" or "rated above X" pattern
+    # Extract rating filters
     rating_above_match = re.search(r'rat(?:ing|ed)\s+(?:above|over)\s+(\d+(?:\.\d+)?)', query_lower)
     if rating_above_match:
         try:
@@ -261,7 +278,6 @@ def select_retrievers(query, faiss_store, pinecone_store):
         except ValueError:
             pass
     
-    # Check for "X star" or "X stars" pattern
     stars_match = re.search(r'(\d+(?:\.\d+)?)\s+stars?', query_lower)
     if stars_match and "reviews.rating_count" not in filter_dict:
         try:
@@ -270,24 +286,24 @@ def select_retrievers(query, faiss_store, pinecone_store):
         except ValueError:
             pass
     
-    # Define regex patterns for each category
+    # Define category patterns for matching
     patterns = {
         "skin": r'\b(skin|face|acne|pimple|complexion|blemish|wrinkle|dark spot|dark circle|pore|blackhead|whitehead|rash|dermatitis|eczema|psoriasis|rosacea|pigmentation|scar|aging|moisturizer|cleanser|toner|serum|sunscreen|skincare)\b',
         "hair": r'\b(hair|scalp|dandruff|hairfall|hair loss|hair growth|split end|frizz|dry hair|oily hair|hair care|shampoo|conditioner|hair mask|hair treatment|hair color|hair dye|hair style|hair product|balding|thinning|alopecia|grey hair|hair texture|hair volume)\b',
         "vitamins_supplements": r'\b(vitamin|supplement|mineral|nutrition|nutrient|deficiency|dietary|multivitamin|antioxidant|omega|protein|calcium|iron|magnesium|zinc|potassium|biotin|collagen|probiotic|prebiotic|amino acid|herbal|natural supplement|wellness|immunity|energy|metabolism)\b'
     }
     
-    # Check each category's pattern against the query
+    # Match query against category patterns
     matched_categories = []
     for category, pattern in patterns.items():
         if re.search(pattern, query_lower):
             matched_categories.append(category)
     
-    # If no categories matched, use all of them
+    # Use all categories if no specific matches
     if not matched_categories:
         matched_categories = list(pinecone_store.keys())
     
-    # Add retrievers for matched categories
+    # Create retrievers for matched categories
     for category in matched_categories:
         if category in pinecone_store:
             try:
@@ -297,10 +313,9 @@ def select_retrievers(query, faiss_store, pinecone_store):
                     selected_retrievers.append(pinecone_store[category].as_retriever())
             except Exception as e:
                 print(f"Error creating retriever for {category}: {e}")
-                # Fall back to retriever without filter
                 selected_retrievers.append(pinecone_store[category].as_retriever())
     
-    # Always add FAISS as a fallback
+    # Add FAISS retriever as fallback
     try:
         if filter_dict:
             selected_retrievers.append(faiss_store.as_retriever(search_kwargs={"filter": filter_dict}))
@@ -308,19 +323,17 @@ def select_retrievers(query, faiss_store, pinecone_store):
             selected_retrievers.append(faiss_store.as_retriever())
     except Exception as e:
         print(f"Error creating FAISS retriever: {e}")
-        # Fall back to retriever without filter
         selected_retrievers.append(faiss_store.as_retriever())
     
-    # Print the filters being applied (for debugging)
     if filter_dict:
         print(f"Applying filters: {filter_dict}")
     
     return selected_retrievers
 
-# Initialize memory function
 def get_memory():
     """
     Initialize and return a ConversationBufferMemory instance.
+    Used to maintain conversation history.
     
     Returns:
         ConversationBufferMemory: The initialized memory
@@ -331,63 +344,62 @@ def get_memory():
     )
 
 
-# Initialize memory in session state
+# Initialize memory in Streamlit session state
 if "memory" not in st.session_state:
-    st.session_state.memory = get_memory() #or generic
+    st.session_state.memory = get_memory()
 memory = st.session_state.memory
 
 def process_query(query, faiss_store, pinecone_store):
     """
     Main function to process user queries.
-    Determines query type and routes to appropriate handler.
-    Uses memory to maintain conversation context.
+    Routes queries to appropriate handlers based on classification.
     
     Args:
-        query (str): The user's query
-        faiss_store: The FAISS vector store
-        pinecone_store: The Pinecone vector store
+        query (str): User's query
+        faiss_store: FAISS vector store
+        pinecone_store: Pinecone vector store
         
     Returns:
-        str: The response to the query
+        str: Response to the query
     """
-    # Use the existing memory from session state instead of creating a new one
+    # Use existing memory from session state
     memory = st.session_state.memory
     
-    # Classify the query
+    # Classify query type
     query_type = classify_query(query)
     
-    # Handle the query based on its type
+    # Route to appropriate handler
     if query_type == "product":
         result = handle_product_query(query, faiss_store, pinecone_store, memory)
-    else:  # general query
+    else:
         result = handle_general_query(query, memory)
     
-    # Save the conversation to memory
+    # Save conversation context
     memory.save_context({"input": query}, {"output": result}) #type: ignore
     
     return result
 
 def handle_product_query(query, faiss_store, pinecone_store, memory):
     """
-    Handles product-based queries by retrieving relevant product information.
+    Handles product-specific queries using vector stores.
     
     Args:
-        query (str): The user's query
-        faiss_store: The FAISS vector store
-        pinecone_store: The Pinecone vector store
-        memory: The conversation memory
+        query (str): User's query
+        faiss_store: FAISS vector store
+        pinecone_store: Pinecone vector store
+        memory: Conversation memory
         
     Returns:
-        str: The response to the query
+        str: Product recommendations and information
     """
-    # Get retrievers based on the query
+    # Get appropriate retrievers
     retrievers = select_retrievers(query, faiss_store, pinecone_store)
     
     # Get conversation history
     memory_variables = memory.load_memory_variables({})
     conversation_history = memory_variables.get("history", "")
     
-    # Create an ensemble retriever if we have multiple retrievers
+    # Use ensemble retriever for multiple sources
     if len(retrievers) > 1:
         ensemble_retriever = EnsembleRetriever(
             retrievers=retrievers,
@@ -397,7 +409,6 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
             docs = ensemble_retriever.get_relevant_documents(query)
         except Exception as e:
             print(f"Error with ensemble retriever: {e}")
-            # Try individual retrievers if ensemble fails
             docs = []
             for retriever in retrievers:
                 try:
@@ -416,9 +427,9 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
     if not docs:
         return "I couldn't find any specific products matching your criteria. Could you try rephrasing your query or providing more details about what you're looking for?"
     
-    # Format the documents with their metadata explicitly included in the text
+    # Format retrieved documents
     formatted_docs = ""
-    for i, doc in enumerate(docs[:8]):  # Limit to first 8 for response
+    for i, doc in enumerate(docs[:8]):
         title = doc.metadata.get('Title', 'Unknown Product')
         price = doc.metadata.get('Price', 'Unknown Price')
         category = doc.metadata.get('Category', 'Unknown Category')
@@ -429,10 +440,10 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
         formatted_docs += f"- Category: {category}\n"
         formatted_docs += f"- Description: {doc.page_content[:200]}...\n\n"
     
-    # Initialize the language model
+    # Initialize language model
     llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
-    # Create a prompt template for product information
+    # Create product information prompt
     template = """
     You are a helpful shopping assistant for health and beauty products.
     Use the following pieces of retrieved context to answer the question.
@@ -455,16 +466,13 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
     
     Answer:"""
     
-    # Create a prompt template with the formatted documents
     PRODUCT_PROMPT = PromptTemplate(
         template=template,
         input_variables=["formatted_docs", "question", "conversation_history"]
     )
     
-    # Create a chain for product information
+    # Create and run product information chain
     product_chain = PRODUCT_PROMPT | llm
-    
-    # Run the query with the formatted documents
     result = product_chain.invoke({
         "formatted_docs": formatted_docs, 
         "question": query,
@@ -475,26 +483,24 @@ def handle_product_query(query, faiss_store, pinecone_store, memory):
 
 def handle_general_query(query, memory):
     """
-    Handles general information queries using BraveSearch.
+    Handles general information queries using web search or LLM knowledge.
     
     Args:
-        query (str): The user's query
-        memory: The conversation memory
+        query (str): User's query
+        memory: Conversation memory
         
     Returns:
-        str: The response to the query
+        str: General information or advice
     """
     # Get conversation history
     memory_variables = memory.load_memory_variables({})
     conversation_history = memory_variables.get("history", "")
     
-    # Check if brave_api_key is available
+    # Handle case when Brave Search API is not available
     if not brave_api_key:
         print("Warning: BRAVE_API_KEY not found in environment variables. Using LLM's knowledge instead.")
-        # Initialize the language model
         llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
         
-        # Create a prompt template for general information without search results
         template = """
         You are a helpful health and beauty advisor.
         The user is asking for general information rather than specific product recommendations.
@@ -508,16 +514,12 @@ def handle_general_query(query, memory):
         Consider the conversation history for context, but prioritize the current query.
         """
         
-        # Create a prompt template
         GENERAL_PROMPT = PromptTemplate(
             template=template,
             input_variables=["question", "conversation_history"]
         )
         
-        # Create a chain for general information
         general_chain = GENERAL_PROMPT | llm
-        
-        # Run the query without search results
         result = general_chain.invoke({
             "question": query,
             "conversation_history": conversation_history
@@ -525,19 +527,18 @@ def handle_general_query(query, memory):
         
         return result
     
-    # Initialize BraveSearch tool
+    # Use Brave Search for web results
     brave_search = BraveSearch.from_api_key(
         api_key=brave_api_key,
-        search_kwargs={"count": 5}  # Limit to 5 results for relevance
+        search_kwargs={"count": 5}
     )
     
-    # Get search results
     search_results = brave_search.run(query)
     
-    # Initialize the language model
+    # Initialize language model
     llm = ChatOpenAI(model=llm_model, api_key=openai_api_key) #type: ignore
     
-    # Create a prompt template for general information
+    # Create general information prompt
     template = """
     You are a helpful health and beauty advisor.
     Use the following search results to answer the user's question.
@@ -576,67 +577,65 @@ def handle_general_query(query, memory):
 def create_streamlit_interface():
     """
     Creates a Streamlit interface for the chatbot.
+    This function handles:
+    - Setting up the page layout and configuration
+    - Initializing vector stores for knowledge retrieval
+    - Managing chat history and memory
+    - Processing user input and displaying responses
     """
-    # Set page title and configuration
+    # Set page title and configuration using Streamlit's page settings
     st.set_page_config(
-        page_title="Health & Beauty Assistant",
-        page_icon="💄",
-        layout="wide"
+        page_title="Health & Beauty Assistant", # Title shown in browser tab
+        layout="wide" # Use wide layout for better readability
     )
     
-    # Add header and description
-    st.title("Health & Beauty Assistant")
+    # Add header and description text to the page
+    st.title("Health & Beauty Assistant") # Main title at top of page
     st.markdown("""
     Ask me about skincare, hair products, vitamins, or general health and beauty advice!
     I can recommend products or provide information based on your needs.
-    """)
+    """) # Descriptive text below title
     
-    # # Add model selection dropdown
-    # model = st.selectbox(
-    #     "Choose the model",
-    #     ["openai", "generic"],
-    #     help="Select which model to use for embeddings and retrieval"
-    # )
-    
-    # Initialize vector stores - this will only run once due to @st.cache_resource
-    with st.spinner("Loading knowledge base..."):
+    # Initialize vector stores for knowledge retrieval
+    # Uses cached function to avoid reloading on each interaction
+    with st.spinner("Loading knowledge base..."): # Show loading spinner
         faiss_store, pinecone_store = initialize_vector_stores("openai", "faiss_index")
     
-    # Use the existing memory from session state instead of creating a new one
-    memory = st.session_state.memory
+    # Get existing conversation memory from Streamlit's session state
+    memory = st.session_state.memory # Maintains context between interactions
     
-    # Initialize chat history in session state if it doesn't exist
+    # Initialize empty chat history if first time loading
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        st.session_state.messages = [] # List to store conversation history
     
-    # Display chat history
+    # Display all previous messages in chat history
     for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        with st.chat_message(message["role"]): # Creates chat bubble UI
+            st.markdown(message["content"]) # Displays message content
     
-    # Chat input
-    if prompt := st.chat_input("What would you like to know?"):
-        # Add user message to chat history
+    # Create and handle chat input field
+    if prompt := st.chat_input("What would you like to know?"): # Get user input
+        # Store user's message in chat history
         st.session_state.messages.append({"role": "user", "content": prompt})
         
-        # Display user message
+        # Display user's message in chat interface
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Display assistant response
+        # Process and display assistant's response
         with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            message_placeholder.markdown("Thinking...")
+            message_placeholder = st.empty() # Create empty placeholder
+            message_placeholder.markdown("Thinking...") # Show temporary thinking message
             
-            # Process the query
+            # Get response from query processing function
             response = process_query(prompt, faiss_store, pinecone_store)
             
-            # Update the placeholder with the response
+            # Update placeholder with actual response
             message_placeholder.markdown(response)
         
-        # Add assistant response to chat history
+        # Store assistant's response in chat history
         st.session_state.messages.append({"role": "assistant", "content": response})
 
-# Entry point
+# Main entry point of the application
 if __name__ == "__main__":
-    create_streamlit_interface()
+    create_streamlit_interface() # Start the Streamlit interface

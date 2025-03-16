@@ -48,3 +48,5 @@ debug.log
 # Add any project-specific files or directories to ignore
 .env
 venv/
+faiss_index/
+faiss_index_generic/
